@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>瑞士轮计分器｜4位小数｜淘汰赛自动对阵</title>
+<style>
+*{box-sizing:border-box;font-family:system-ui}
+body{max-width:950px;margin:10px auto;padding:10px;background:#f5f7fa}
+.card{background:#fff;padding:16px;border-radius:10px;margin-bottom:16px;box-shadow:0 1px 4px #0001}
+input,textarea{padding:8px;font-size:16px;width:100%;margin:4px 0;border:1px solid #ccc;border-radius:6px}
+button{padding:10px 14px;font-size:16px;border:none;border-radius:6px;margin:4px;background:#2563eb;color:white;cursor:pointer}
+button.del{background:#dc2626}
+button.sec{background:#64748b}
+table{width:100%;border-collapse:collapse;margin:8px 0;font-size:14px}
+td,th{border:1px solid #ddd;padding:6px;text-align:center}
+th{background:#f1f5f9}
+.match-row{background:#fff8e6}
+textarea{min-height:100px}
+pre{background:#f8fafc;padding:10px;border-radius:6px;white-space:pre-wrap;font-size:14px}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>🏆瑞士轮计分器｜4位小数｜淘汰赛自动对阵</h2>
+<div>
+<h4>1. 添加选手（每行一个名字）</h4>
+<textarea id="playerList" rows="6" placeholder="例如：
+选手A
+选手B
+选手C
+选手D"></textarea>
+<br>
+<button onclick="initPlayers()">初始化选手</button>
+<button class="sec" onclick="loadFromLocal()">读取本地保存数据</button>
+<button class="del" onclick="clearAll()">清空全部数据</button>
+</div>
+</div>
+
+<div class="card">
+<h4>2. 选手状态（主积分｜对手分OP｜保留4位小数）</h4>
+<div id="playerTable"></div>
+</div>
+
+<div class="card">
+<h4>3. 生成下一轮对战表</h4>
+<button onclick="genSwissPair()">生成本轮配对</button>
+<div id="matchList"></div>
+</div>
+
+<div class="card">
+<h4>4. 录入本轮赛果（胜=3，平=1，负=0；轮空自动+3）</h4>
+<button onclick="saveRoundResult()">保存本轮结果，更新积分与对手分</button>
+<div id="resultArea"></div>
+</div>
+
+<div class="card">
+<h4>📊 完整排名（主分降序 -> 对手分OP降序）</h4>
+<div id="rankTable"></div>
+</div>
+
+<div class="card">
+<h4>🏁 淘汰赛生成</h4>
+<p>晋级淘汰赛人数（必须是2的幂：2/4/8/16/32）：<input type="number" id="topN" value="8" style="width:120px"></p>
+<button onclick="genKnockout()">生成淘汰赛名单+对阵表</button>
+<pre id="knockoutOutput"></pre>
+</div>
+
+<script>
+let players = [];
+let currentMatches = [];
+
+//本地存储
+function saveLocal(){
+    localStorage.setItem("swissFullData",JSON.stringify({players,currentMatches}));
+}
+function loadFromLocal(){
+    const s = localStorage.getItem("swissFullData");
+    if(!s){alert("没有保存的数据");return;}
+    const obj = JSON.parse(s);
+    players = obj.players;
+    currentMatches = obj.currentMatches;
+    renderPlayerTable();
+    renderRank();
+    alert("已加载本地保存数据");
+}
+function clearAll(){
+    localStorage.removeItem("swissFullData");
+    players = [];currentMatches=[];
+    renderPlayerTable();renderRank();
+}
+
+//初始化选手
+function initPlayers(){
+    const txt = document.getElementById("playerList").value.trim();
+    const names = txt.split(/\n+/).filter(s=>s.trim());
+    players = names.map(name=>{
+        return {
+            name:name.trim(),
+            score:0,        //主积分
+            op:0,           //对手分OP
+            history:[],     //交手对手名字
+            oppScoreList:[] //对手交手前积分，用于OP计算
+        }
+    });
+    renderPlayerTable();
+    saveLocal();
+    alert(`已载入 ${players.length} 位选手`);
+}
+
+//格式化保留4位小数
+function fmt4(x){
+    return Number(x.toFixed(4));
+}
+
+//重算对手分OP
+function recalcOP(){
+    for(let p of players){
+        let sum=0;
+        for(let s of p.oppScoreList){
+            sum += s;
+        }
+        p.op = fmt4(sum);
+    }
+}
+
+//渲染选手表格
+function renderPlayerTable(){
+    recalcOP();
+    let html = `<table>
+<tr>
+<th>选手</th>
+<th>主积分</th>
+<th>对手分OP</th>
+<th>历史交手</th>
+</tr>`;
+    for(let p of players){
+        html += `<tr>
+<td>${p.name}</td>
+<td>${p.score.toFixed(4)}</td>
+<td>${p.op.toFixed(4)}</td>
+<td>${p.history.join(", ")||"无"}</td>
+</tr>`;
+    }
+    html += "</table>";
+    document.getElementById("playerTable").innerHTML = html;
+    renderRank();
+}
+
+//瑞士轮配对：同分优先，避免重复交手
+function genSwissPair(){
+    if(players.length <2){alert("至少2名选手");return}
+    let sorted = [...players].sort((a,b)=>b.score - a.score);
+    let remain = [...sorted];
+    let matches = [];
+
+    while(remain.length >=2){
+        let first = remain.shift();
+        let idx = -1;
+        for(let i=0;i<remain.length;i++){
+            if(!first.history.includes(remain[i].name)){
+                idx=i;break;
+            }
+        }
+        if(idx === -1) idx=0;
+        let second = remain.splice(idx,1)[0];
+        matches.push({p1:first,p2:second});
+    }
+    if(remain.length===1){
+        matches.push({p1:remain[0],p2:null,isBye:true})
+    }
+    currentMatches = matches;
+    renderMatchList();
+}
+
+//渲染对战列表
+function renderMatchList(){
+    let html = `<table>
+<tr>
+<th>场次</th>
+<th>选手A</th>
+<th>选手B</th>
+<th>结果</th>
+</tr>`;
+    for(let i=0;i<currentMatches.length;i++){
+        const m = currentMatches[i];
+        if(m.isBye){
+            html += `<tr class="match-row">
+                <td>${i+1}</td>
+                <td>${m.p1.name}</td>
+                <td>【轮空】</td>
+                <td>轮空自动+3分</td>
+            </tr>`;
+            continue;
+        }
+        html += `<tr class="match-row">
+            <td>${i+1}</td>
+            <td>${m.p1.name}</td>
+            <td>${m.p2.name}</td>
+            <td>
+                <select data-match="${i}">
+                    <option value="win1">A胜</option>
+                    <option value="draw">平局</option>
+                    <option value="win2">B胜</option>
+                </select>
+            </td>
+        </tr>`
+    }
+    html += "</table>";
+    document.getElementById("matchList").innerHTML = html;
+}
+
+//保存本轮赛果
+function saveRoundResult(){
+    const selList = document.querySelectorAll("select[data-match]");
+    for(let sel of selList){
+        const idx = Number(sel.dataset.match);
+        const m = currentMatches[idx];
+        if(m.isBye){
+            m.p1.score +=3;
+            continue;
+        }
+        const res = sel.value;
+        m.p1.history.push(m.p2.name);
+        m.p2.history.push(m.p1.name);
+        m.p1.oppScoreList.push(m.p2.score);
+        m.p2.oppScoreList.push(m.p1.score);
+
+        if(res === "win1"){
+            m.p1.score +=3;
+        }else if(res === "win2"){
+            m.p2.score +=3;
+        }else if(res === "draw"){
+            m.p1.score +=1;
+            m.p2.score +=1;
+        }
+    }
+    renderPlayerTable();
+    saveLocal();
+    alert("本轮结果已保存！积分、对手分OP更新完成");
+}
+
+//渲染总排名
+function renderRank(){
+    recalcOP();
+    let sorted = [...players].sort((a,b)=>{
+        if(b.score !== a.score) return b.score - a.score;
+        return b.op - a.op;
+    });
+    let html = `<table>
+<tr>
+<th>排名</th>
+<th>选手</th>
+<th>主积分</th>
+<th>对手分OP</th>
+</tr>`;
+    sorted.forEach((p,i)=>{
+        html += `<tr>
+<td>${i+1}</td>
+<td>${p.name}</td>
+<td>${p.score.toFixed(4)}</td>
+<td>${p.op.toFixed(4)}</td>
+</tr>`
+    })
+    html += "</table>";
+    document.getElementById("rankTable").innerHTML = html;
+}
+
+/**
+ * 标准淘汰赛种子排布（2的幂）
+ * 8强示例：1-8，2-7，3-6，4-5
+ * @param {Array} topPlayers 已经排好序的晋级选手数组
+ * @returns 对阵数组 [[种子1,种子8],[种子2,种子7],[种子3,种子6],[种子4,种子5]]
+ */
+function makeKnockoutBracket(topPlayers){
+    const n = topPlayers.length;
+    if(!(n && (n & (n-1)) === 0)){
+        throw new Error("晋级人数必须是2的幂：2,4,8,16,32");
+    }
+    const bracket = [];
+    let left = 0;
+    let right = n-1;
+    while(left < right){
+        bracket.push([topPlayers[left], topPlayers[right]]);
+        left++;
+        right--;
+    }
+    return bracket;
+}
+
+//生成完整淘汰赛输出文本
+function genKnockout(){
+    recalcOP();
+    const topN = Number(document.getElementById("topN").value);
+    let sorted = [...players].sort((a,b)=>{
+        if(b.score !== a.score) return b.score - a.score;
+        return b.op - a.op;
+    });
+    if(topN > sorted.length){
+        alert(`选手总数只有${sorted.length}，不能选${topN}人晋级`);
+        return;
+    }
+    const topPlayers = sorted.slice(0,topN);
+    let out = "";
+    out += `===== 淘汰赛入围名单（前${topN}名）=====\n`;
+    topPlayers.forEach((p,i)=>{
+        out += `${i+1}. ${p.name} | 主分:${p.score.toFixed(4)} | OP:${p.op.toFixed(4)}\n`;
+    });
+    out += "\n===== 淘汰赛首轮对阵表（种子排布）=====\n";
+    try{
+        const bracket = makeKnockoutBracket(topPlayers);
+        bracket.forEach((pair,idx)=>{
+            const [p1,p2] = pair;
+            out += `【第${idx+1}场】${p1.name}  VS  ${p2.name}\n`;
+        });
+    }catch(e){
+        out += "⚠️错误："+e.message+"\n请输入2的幂的晋级人数(2/4/8/16/32)";
+    }
+    document.getElementById("knockoutOutput").innerText = out;
+}
+</script>
+</body>
+</html>
